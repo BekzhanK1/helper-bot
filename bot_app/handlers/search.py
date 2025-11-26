@@ -3,17 +3,14 @@ from typing import List, Optional
 from aiogram import F, Router
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 from asgiref.sync import sync_to_async
 from django.db.models import F as DjangoF
 
 from bot_app.keyboards.main import main_menu_keyboard
 from bot_app.keyboards.navigation import NAV_BACK_BUTTON
-from bot_app.keyboards.search import (
-    category_keyboard,
-    place_review_keyboard,
-    results_navigation_keyboard,
-)
+from bot_app.keyboards.search import category_keyboard
+from bot_app.keyboards.search_kbs import build_place_navigation_keyboard
 from bot_app.models import Category, Place, User
 from bot_app.states.search import SearchState
 
@@ -81,15 +78,57 @@ def search_places(city_id: int, category_id: int) -> List[Place]:
     return ordered
 
 
+@sync_to_async
+def get_place_by_id(place_id: int) -> Optional[Place]:
+    return Place.objects.filter(id=place_id).first()
+
+
 def render_place_card(place: Place) -> str:
     rating = f"{place.avg_rating:.1f}" if place.avg_rating else "—"
-    summary = place.ai_summary or "AI-описание появится позже."
+    ai_summary = place.ai_summary or "AI-описание появится позже."
     return (
-        f"<b>{place.name}</b>\n"
-        f"⭐ {rating} | {place.review_count} отзывов\n"
-        f"📍 {place.address}\n"
-        f"{summary}"
+        f"🏆 <b>{place.name}</b> (⭐ {rating} / 📝 {place.review_count})\n"
+        f"📍 {place.address}\n\n"
+        "🤖 <i>Мнение нейросети:</i>\n"
+        f"{ai_summary}"
     )
+
+
+async def send_place_card(
+    target_message: Message,
+    state: FSMContext,
+    *,
+    new_message: bool = False,
+) -> None:
+    data = await state.get_data()
+    place_ids: List[int] = data.get("found_place_ids") or []
+    total = len(place_ids)
+    if total == 0:
+        text = "Нет подходящих мест. Вернитесь назад и выберите другую категорию."
+        if new_message:
+            await target_message.answer(text, reply_markup=main_menu_keyboard())
+        else:
+            await target_message.edit_text(text, reply_markup=main_menu_keyboard())
+        return
+
+    current_index = data.get("current_index", 0)
+    current_index = max(0, min(current_index, total - 1))
+    place = await get_place_by_id(place_ids[current_index])
+    if not place:
+        await target_message.answer("Не удалось загрузить место. Попробуйте снова позже.")
+        return
+
+    text = render_place_card(place)
+    keyboard = build_place_navigation_keyboard(
+        current_index=current_index,
+        total=total,
+        place_id=place.id,
+    )
+
+    if new_message:
+        await target_message.answer(text, reply_markup=keyboard)
+    else:
+        await target_message.edit_text(text, reply_markup=keyboard)
 
 
 @router.message(F.text == "🔍 Найти место")
@@ -124,17 +163,16 @@ async def start_search(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(SearchState.category)
-async def process_category(message: Message, state: FSMContext) -> None:
+async def _run_search_for_category(
+    message: Message,
+    state: FSMContext,
+    *,
+    category: Category,
+) -> None:
     from_user = message.from_user
     if not from_user:
         await message.answer("Не удалось определить ваш Telegram ID.")
         await state.clear()
-        return
-
-    category = await find_category_by_name(message.text or "")
-    if not category:
-        await message.answer("Не нашёл такую категорию. Выберите вариант из списка.")
         return
 
     data = await state.get_data()
@@ -150,27 +188,33 @@ async def process_category(message: Message, state: FSMContext) -> None:
         await state.clear()
         return
 
-    await state.update_data(category_id=category.id)
     places = await search_places(city_id=city_id, category_id=category.id)
     await state.set_state(SearchState.results)
 
     if not places:
+        await state.update_data(found_place_ids=[], current_index=0)
         await message.answer(
             "В базе пока пусто, но вот данные из Google Maps... (скоро подключим API).",
-            reply_markup=results_navigation_keyboard(),
+            reply_markup=main_menu_keyboard(),
         )
         return
 
-    for place in places:
-        await message.answer(
-            render_place_card(place),
-            reply_markup=place_review_keyboard(place.id),
-        )
-
-    await message.answer(
-        "Что дальше?",
-        reply_markup=results_navigation_keyboard(),
+    await state.update_data(
+        category_id=category.id,
+        found_place_ids=[place.id for place in places],
+        current_index=0,
     )
+    await send_place_card(message, state, new_message=True)
+
+
+@router.message(SearchState.category)
+async def process_category(message: Message, state: FSMContext) -> None:
+    category = await find_category_by_name(message.text or "")
+    if not category:
+        await message.answer("Не нашёл такую категорию. Выберите вариант из списка.")
+        return
+
+    await _run_search_for_category(message, state, category=category)
 
 
 @router.message(StateFilter(SearchState.results), F.text == NAV_BACK_BUTTON)
@@ -191,7 +235,11 @@ async def search_back_to_categories(message: Message, state: FSMContext) -> None
         return
 
     await state.set_state(SearchState.category)
-    await state.update_data(category_id=None)
+    await state.update_data(
+        category_id=None,
+        found_place_ids=[],
+        current_index=0,
+    )
     await message.answer(
         "Выберите другую категорию:",
         reply_markup=category_keyboard(categories),
@@ -199,8 +247,57 @@ async def search_back_to_categories(message: Message, state: FSMContext) -> None
 
 
 @router.message(StateFilter(SearchState.results))
-async def search_results_fallback(message: Message) -> None:
+async def search_results_input(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Используйте кнопки под карточкой или введите категорию заново.")
+        return
+
+    category = await find_category_by_name(text)
+    if category:
+        await _run_search_for_category(message, state, category=category)
+        return
+
     await message.answer(
-        "Используйте кнопки внизу, чтобы вернуться или открыть меню.",
-        reply_markup=results_navigation_keyboard(),
+        "Используйте кнопки под карточкой, чтобы листать места или откройте меню.",
+        reply_markup=main_menu_keyboard(),
     )
+
+
+@router.callback_query(StateFilter(SearchState.results), F.data == "nav_next")
+async def handle_next(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    place_ids: List[int] = data.get("found_place_ids") or []
+    index = data.get("current_index", 0)
+    if index >= len(place_ids) - 1:
+        await callback.answer("Это последняя карточка.")
+        return
+
+    await state.update_data(current_index=index + 1)
+    await send_place_card(callback.message, state)
+    await callback.answer()
+
+
+@router.callback_query(StateFilter(SearchState.results), F.data == "nav_prev")
+async def handle_prev(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    index = data.get("current_index", 0)
+    if index <= 0:
+        await callback.answer("Это первая карточка.")
+        return
+
+    await state.update_data(current_index=index - 1)
+    await send_place_card(callback.message, state)
+    await callback.answer()
+
+
+@router.callback_query(StateFilter(SearchState.results), F.data == "nav_ignore")
+async def handle_nav_ignore(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+
+@router.callback_query(StateFilter(SearchState.results), F.data == "main_menu")
+async def handle_nav_main_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await callback.answer()
+    await callback.message.answer("Главное меню:", reply_markup=main_menu_keyboard())

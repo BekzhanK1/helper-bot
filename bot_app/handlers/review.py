@@ -22,6 +22,7 @@ from bot_app.keyboards.review import (
     text_keyboard,
 )
 from bot_app.models import Category, Place, Review, User
+from bot_app.services.ai_service import analyze_review
 from bot_app.states.review import AddReviewState
 
 router = Router()
@@ -80,18 +81,10 @@ def create_place_record(
         category_id=category_id,
         location={},
     )
-    return Place.objects.create(
-        name=name,
-        address=address,
-        city_id=city_id,
-        category=category,
-        location={},
-    )
 
 
 @sync_to_async
-@transaction.atomic
-def save_review_and_reward(
+def create_pending_review(
     *,
     user_id: int,
     place_id: int,
@@ -99,7 +92,7 @@ def save_review_and_reward(
     text: str,
     photos: List[str],
 ) -> Review:
-    review = Review.objects.create(
+    return Review.objects.create(
         user_id=user_id,
         place_id=place_id,
         rating=rating,
@@ -109,18 +102,36 @@ def save_review_and_reward(
         photo_ids=photos,
     )
 
-    User.objects.filter(telegram_id=user_id).update(
+
+@sync_to_async
+def mark_review_rejected(review_id: int) -> None:
+    Review.objects.filter(id=review_id).update(status=Review.Status.REJECTED)
+
+
+@sync_to_async
+@transaction.atomic
+def publish_review(review_id: int, summary: str) -> None:
+    review = (
+        Review.objects.select_for_update()
+        .select_related("place")
+        .get(id=review_id)
+    )
+    place = review.place
+
+    total_score = place.avg_rating * place.review_count
+    place.review_count += 1
+    place.avg_rating = (total_score + review.rating) / place.review_count
+    if summary:
+        place.ai_summary = summary
+    place.save(update_fields=["avg_rating", "review_count", "ai_summary"])
+
+    review.status = Review.Status.PUBLISHED
+    review.save(update_fields=["status"])
+
+    User.objects.filter(telegram_id=review.user_id).update(
         balance_requests=DjangoF("balance_requests") + 10,
         reputation_points=DjangoF("reputation_points") + 10,
     )
-
-    place = Place.objects.select_for_update().get(id=place_id)
-    total_score = place.avg_rating * place.review_count
-    place.review_count += 1
-    place.avg_rating = (total_score + rating) / place.review_count
-    place.save(update_fields=["avg_rating", "review_count"])
-
-    return review
 
 
 def sanitize_text(value: Optional[str]) -> Optional[str]:
@@ -153,18 +164,12 @@ async def ensure_user_registered(
     return user
 
 
-@router.callback_query(F.data.startswith(f"{LEAVE_REVIEW_PREFIX}:"))
-async def handle_leave_review_callback(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
+async def _start_review_flow_from_place(
+    callback: CallbackQuery,
+    state: FSMContext,
+    place_id: int,
+) -> None:
     if not callback.message:
-        return
-
-    data = callback.data or ""
-    try:
-        _, place_id_str = data.split(":", 1)
-        place_id = int(place_id_str)
-    except (ValueError, AttributeError):
-        await callback.message.answer("Не удалось определить место. Попробуйте ещё раз.")
         return
 
     user = await ensure_user_registered(
@@ -197,6 +202,34 @@ async def handle_leave_review_callback(callback: CallbackQuery, state: FSMContex
         f"Оставим отзыв о <b>{place.name}</b>. Поставьте оценку от 1 до 5:",
         reply_markup=rating_keyboard(),
     )
+
+
+@router.callback_query(F.data.startswith(f"{LEAVE_REVIEW_PREFIX}:"))
+async def handle_leave_review_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    data = callback.data or ""
+    try:
+        _, place_id_str = data.split(":", 1)
+        place_id = int(place_id_str)
+    except (ValueError, AttributeError):
+        await callback.message.answer("Не удалось определить место. Попробуйте ещё раз.")
+        return
+
+    await _start_review_flow_from_place(callback, state, place_id)
+
+
+@router.callback_query(F.data.startswith("review_"))
+async def handle_review_shortcut(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    data = callback.data or ""
+    try:
+        _, place_id_str = data.split("_", 1)
+        place_id = int(place_id_str)
+    except (ValueError, AttributeError):
+        await callback.message.answer("Не удалось определить место. Попробуйте ещё раз.")
+        return
+
+    await _start_review_flow_from_place(callback, state, place_id)
 
 
 @router.message(F.text == "➕ Добавить отзыв")
@@ -409,16 +442,33 @@ async def finalize_review(message: Message, state: FSMContext) -> None:
         )
         return
 
-    await save_review_and_reward(
+    review = await create_pending_review(
         user_id=user_id,
         place_id=place_id,
         rating=rating,
         text=review_text,
         photos=photos,
     )
+
+    print(f"AI moderation: analyzing review_id={review.id}")
+    analysis = await sync_to_async(analyze_review)(review_text)
+    print(f"AI moderation: result={analysis}")
+    is_spam = bool(analysis.get("is_spam"))
+    summary = analysis.get("summary", "")
+
+    if is_spam:
+        await mark_review_rejected(review.id)
+        await state.clear()
+        await message.answer(
+            "Отзыв выглядит как спам, поэтому он не был опубликован.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    await publish_review(review.id, summary)
     await state.clear()
     await message.answer(
-        "Спасибо! Отзыв на проверке. Вам начислено 10 запросов.",
+        "Спасибо! Отзыв опубликован. Вам начислено 10 запросов.",
         reply_markup=main_menu_keyboard(),
     )
 
