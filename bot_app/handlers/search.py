@@ -3,7 +3,7 @@ from typing import List, Optional
 from aiogram import F, Router
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InputMediaPhoto, Message
 from asgiref.sync import sync_to_async
 from django.db.models import F as DjangoF
 
@@ -11,7 +11,7 @@ from bot_app.keyboards.main import main_menu_keyboard
 from bot_app.keyboards.navigation import NAV_BACK_BUTTON
 from bot_app.keyboards.search import category_keyboard
 from bot_app.keyboards.search_kbs import build_place_navigation_keyboard
-from bot_app.models import Category, Place, User
+from bot_app.models import Category, Place, Review, User
 from bot_app.states.search import SearchState
 
 router = Router()
@@ -83,6 +83,28 @@ def get_place_by_id(place_id: int) -> Optional[Place]:
     return Place.objects.filter(id=place_id).first()
 
 
+@sync_to_async
+def get_recent_place_photos(place_id: int, limit: int = 5) -> List[str]:
+    photos: List[str] = []
+    qs = (
+        Review.objects.filter(
+            place_id=place_id,
+            status=Review.Status.PUBLISHED,
+            photo_ids__isnull=False,
+        )
+        .order_by("-id")
+        .values_list("photo_ids", flat=True)
+    )
+    for batch in qs:
+        if not batch:
+            continue
+        batch_list = list(batch)
+        photos.extend(batch_list)
+        if len(photos) >= limit:
+            break
+    return photos[:limit]
+
+
 def render_place_card(place: Place) -> str:
     rating = f"{place.avg_rating:.1f}" if place.avg_rating else "—"
     ai_summary = place.ai_summary or "AI-описание появится позже."
@@ -124,6 +146,11 @@ async def send_place_card(
         total=total,
         place_id=place.id,
     )
+
+    photos = await get_recent_place_photos(place.id)
+    if photos and new_message:
+        media = [InputMediaPhoto(media=file_id) for file_id in photos]
+        await target_message.answer_media_group(media)
 
     if new_message:
         await target_message.answer(text, reply_markup=keyboard)
