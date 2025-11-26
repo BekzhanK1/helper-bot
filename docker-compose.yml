@@ -1,0 +1,33 @@
+version: "3.9"
+
+services:
+  web:
+    build: .
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py runserver 0.0.0.0:8000"
+    ports:
+      - "2000:8000"
+    env_file:
+      - .env
+    environment:
+      SQLITE_DB_FILENAME: data/db.sqlite3
+    volumes:
+      - db_data:/app/data
+
+  bot:
+    build: .
+    command: >
+      sh -c "python manage.py runbot"
+    depends_on:
+      - web
+    env_file:
+      - .env
+    environment:
+      SQLITE_DB_FILENAME: data/db.sqlite3
+    volumes:
+      - db_data:/app/data
+
+volumes:
+  db_data:
+
