@@ -3,7 +3,7 @@ from typing import Dict, List, Optional
 from aiogram import F, Router
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message, User as TelegramUser
 from asgiref.sync import sync_to_async
 from django.db import transaction
 from django.db.models import F as DjangoF
@@ -27,6 +27,7 @@ from bot_app.states.review import AddReviewState
 router = Router()
 
 PLACE_RESULTS_LIMIT = 6
+LEAVE_REVIEW_PREFIX = "leave_review"
 
 
 @sync_to_async
@@ -50,6 +51,16 @@ def search_places(city_id: int, name_query: str) -> List[Dict[str, str]]:
 @sync_to_async
 def list_categories() -> List[Dict[str, str]]:
     return list(Category.objects.order_by("name").values("id", "name"))
+
+
+@sync_to_async
+def get_place(place_id: int) -> Optional[Place]:
+    return Place.objects.filter(id=place_id).first()
+
+
+@sync_to_async
+def user_has_review(user_id: int, place_id: int) -> bool:
+    return Review.objects.filter(user_id=user_id, place_id=place_id).exists()
 
 
 @sync_to_async
@@ -119,8 +130,12 @@ def sanitize_text(value: Optional[str]) -> Optional[str]:
     return cleaned or None
 
 
-async def ensure_user_registered(message: Message, state: FSMContext) -> Optional[User]:
-    from_user = message.from_user
+async def ensure_user_registered(
+    message: Message,
+    state: FSMContext,
+    telegram_user: Optional[TelegramUser] = None,
+) -> Optional[User]:
+    from_user = telegram_user or message.from_user
     if not from_user:
         await message.answer("Не удалось определить ваш Telegram ID.")
         return None
@@ -136,6 +151,52 @@ async def ensure_user_registered(message: Message, state: FSMContext) -> Optiona
         await message.answer("У вас не указан город. Пройдите регистрацию через /start.")
         return None
     return user
+
+
+@router.callback_query(F.data.startswith(f"{LEAVE_REVIEW_PREFIX}:"))
+async def handle_leave_review_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if not callback.message:
+        return
+
+    data = callback.data or ""
+    try:
+        _, place_id_str = data.split(":", 1)
+        place_id = int(place_id_str)
+    except (ValueError, AttributeError):
+        await callback.message.answer("Не удалось определить место. Попробуйте ещё раз.")
+        return
+
+    user = await ensure_user_registered(
+        callback.message,
+        state,
+        telegram_user=callback.from_user,
+    )
+    if not user:
+        return
+
+    has_review = await user_has_review(user.telegram_id, place_id)
+    if has_review:
+        await callback.message.answer("Вы уже оставляли отзыв об этом месте.")
+        return
+
+    place = await get_place(place_id)
+    if not place:
+        await callback.message.answer("Место не найдено. Обновите список и попробуйте снова.")
+        return
+
+    await state.clear()
+    await state.update_data(
+        user_id=user.telegram_id,
+        city_id=user.city_id,
+        place_id=place.id,
+        place_name=place.name,
+    )
+    await state.set_state(AddReviewState.rating)
+    await callback.message.answer(
+        f"Оставим отзыв о <b>{place.name}</b>. Поставьте оценку от 1 до 5:",
+        reply_markup=rating_keyboard(),
+    )
 
 
 @router.message(F.text == "➕ Добавить отзыв")
