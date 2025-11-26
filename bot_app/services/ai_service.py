@@ -1,7 +1,10 @@
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
+from asgiref.sync import sync_to_async
 from django.conf import settings
+
+from bot_app.models import Place, Review
 
 try:
     from openai import OpenAI
@@ -19,6 +22,20 @@ USER_TEMPLATE = (
     "Верни JSON строго в формате {{\"is_spам\": bool, \"summary\": str}}.\n\n"
     "Отзыв:\n{review}"
 )
+
+SUMMARY_SYSTEM_PROMPT = (
+    "Ты помощник по городским местам. Проанализируй отзывы пользователей. "
+    "Напиши объективный вывод на русском языке (максимум 2-3 предложения). "
+    "Сначала выдели главное достоинство, затем главный недостаток (если есть). "
+    "Не используй вводные фразы типа 'Судя по отзывам', пиши сразу по сути."
+)
+
+SUMMARY_USER_TEMPLATE = (
+    "Вот короткие отзывы пользователей:\n\n{reviews}\n\n"
+    "Сформируй итоговое описание в 2-3 предложениях."
+)
+
+SUMMARY_PLACEHOLDER = "Пока недостаточно отзывов для анализа"
 
 _client = None
 
@@ -80,3 +97,62 @@ def analyze_review(text: str) -> Dict[str, Any]:
         import traceback
         traceback.print_exc()
         return {"is_spam": False, "summary": ""}
+
+
+def _build_reviews_block(reviews: List[str]) -> str:
+    return "\n".join(f"{idx}. {text}" for idx, text in enumerate(reviews, start=1))
+
+
+def summarize_reviews(reviews: List[str]) -> str:
+    client = _get_client()
+    if client is None:
+        return ""
+
+    reviews_block = _build_reviews_block(reviews)
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            temperature=0.3,
+            messages=[
+                {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": SUMMARY_USER_TEMPLATE.format(reviews=reviews_block),
+                },
+            ],
+        )
+        return (completion.choices[0].message.content or "").strip()
+    except Exception:  # pragma: no cover
+        return ""
+
+
+def _fetch_place_and_reviews(place_id: int):
+    try:
+        place = Place.objects.get(id=place_id)
+    except Place.DoesNotExist:
+        return None, []
+    reviews = list(
+        Review.objects.filter(place=place, status=Review.Status.PUBLISHED)
+        .order_by("-id")
+        .values_list("text", flat=True)[:10]
+    )
+    return place, reviews
+
+
+def _save_place_summary(place: Place, summary: str) -> None:
+    place.ai_summary = summary
+    place.save(update_fields=["ai_summary"])
+
+
+async def update_place_summary(place_id: int) -> None:
+    place, reviews = await sync_to_async(_fetch_place_and_reviews)(place_id)
+    if not place:
+        return
+
+    if not reviews:
+        await sync_to_async(_save_place_summary)(place, SUMMARY_PLACEHOLDER)
+        return
+
+    summary = await sync_to_async(summarize_reviews)(list(reviews))
+    summary = summary or SUMMARY_PLACEHOLDER
+    await sync_to_async(_save_place_summary)(place, summary)

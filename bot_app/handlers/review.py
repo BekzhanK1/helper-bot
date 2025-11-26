@@ -22,7 +22,7 @@ from bot_app.keyboards.review import (
     text_keyboard,
 )
 from bot_app.models import Category, Place, Review, User
-from bot_app.services.ai_service import analyze_review
+from bot_app.services.ai_service import analyze_review, update_place_summary
 from bot_app.states.review import AddReviewState
 
 router = Router()
@@ -466,6 +466,7 @@ async def finalize_review(message: Message, state: FSMContext) -> None:
         return
 
     await publish_review(review.id, summary)
+    await update_place_summary(place_id)
     await state.clear()
     await message.answer(
         "Спасибо! Отзыв опубликован. Вам начислено 10 запросов.",
