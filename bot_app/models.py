@@ -63,9 +63,10 @@ class Place(models.Model):
     address = models.CharField(max_length=255)
     city = models.ForeignKey(
         City, on_delete=models.CASCADE, related_name="places")
-    location = models.JSONField(default=dict)  # {"lat": float, "lon": float}
+    # {"lat": float, "lon": float}
+    location = models.JSONField(default=dict, blank=True, null=True)
     category = models.ForeignKey(
-        Category, on_delete=models.CASCADE, related_name="places")
+        Category, on_delete=models.CASCADE, related_name="places", blank=True, null=True)  # made optional
     google_place_id = models.CharField(
         max_length=255, unique=True, blank=True, null=True)
     avg_rating = models.FloatField(default=0.0)

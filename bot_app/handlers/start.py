@@ -1,12 +1,13 @@
 from typing import List, Optional
 
-from aiogram import Router
-from aiogram.filters import CommandStart
+from aiogram import F, Router
+from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 from asgiref.sync import sync_to_async
 
 from bot_app.keyboards.main import main_menu_keyboard
+from bot_app.keyboards.navigation import NAV_BACK_BUTTON
 from bot_app.keyboards.registration import city_keyboard, role_keyboard
 from bot_app.models import City, User
 from bot_app.states.registration import RegistrationState
@@ -140,4 +141,20 @@ async def process_role(message: Message, state: FSMContext) -> None:
     await message.answer(
         "Регистрация завершена! Добро пожаловать в City Guide.",
         reply_markup=main_menu_keyboard(),
+    )
+
+
+@router.message(StateFilter(RegistrationState.role), F.text == NAV_BACK_BUTTON)
+async def registration_back_to_city(message: Message, state: FSMContext) -> None:
+    cities = await list_active_cities()
+    if not cities:
+        await state.clear()
+        await message.answer("Пока нет доступных городов. Попробуйте позже.")
+        return
+
+    await state.update_data(city_id=None)
+    await state.set_state(RegistrationState.city)
+    await message.answer(
+        "Вернёмся к выбору города. Пожалуйста, выберите город:",
+        reply_markup=city_keyboard(cities),
     )

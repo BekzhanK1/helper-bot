@@ -1,6 +1,8 @@
 from typing import Iterable, List
 
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import ReplyKeyboardMarkup
+
+from .navigation import get_navigation_keyboard
 
 
 def chunked(iterable: Iterable[str], size: int = 2) -> List[list[str]]:
@@ -15,24 +17,13 @@ def chunked(iterable: Iterable[str], size: int = 2) -> List[list[str]]:
 
 
 def city_keyboard(city_names: list[str]) -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton(text=name) for name in row] for row in chunked(city_names, 2)]
-    return ReplyKeyboardMarkup(
-        keyboard=rows or [[KeyboardButton(text="Нет доступных городов")]],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-        input_field_placeholder="Выберите город",
-    )
+    button_rows = chunked(city_names, 2) or [["Нет доступных городов"]]
+    return get_navigation_keyboard(button_rows, include_back=False, include_menu=True)
 
 
 ROLE_LABELS = ["Турист", "Студент", "Местный"]
 
 
 def role_keyboard() -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton(text=label)] for label in ROLE_LABELS]
-    return ReplyKeyboardMarkup(
-        keyboard=rows,
-        resize_keyboard=True,
-        one_time_keyboard=True,
-        input_field_placeholder="Выберите роль",
-    )
-
+    button_rows = [[label] for label in ROLE_LABELS]
+    return get_navigation_keyboard(button_rows, include_back=True, include_menu=True)
