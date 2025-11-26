@@ -32,7 +32,7 @@ DEBUG = os.getenv("DEBUG", "true").lower() == "true"
 
 _raw_hosts = os.getenv("ALLOWED_HOSTS", "")
 ALLOWED_HOSTS = [host.strip()
-                 for host in _raw_hosts.split(",") if host.strip()]
+                 for host in _raw_hosts.split(",") if host.strip()] or ["*"]
 
 
 # Application definition
