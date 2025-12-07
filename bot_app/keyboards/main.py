@@ -5,6 +5,7 @@ MAIN_MENU_BUTTONS = [
     "➕ Добавить отзыв",
     "👤 Профиль",
     "📚 Гайды",
+    "🤖 AI-Помощник",
     "🆘 Помощь",
 ]
 
@@ -19,6 +20,9 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
             KeyboardButton(text=MAIN_MENU_BUTTONS[2]),
             KeyboardButton(text=MAIN_MENU_BUTTONS[3]),
         ],
-        [KeyboardButton(text=MAIN_MENU_BUTTONS[4])],
+        [
+            KeyboardButton(text=MAIN_MENU_BUTTONS[4]),
+            KeyboardButton(text=MAIN_MENU_BUTTONS[5]),
+        ],
     ]
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)

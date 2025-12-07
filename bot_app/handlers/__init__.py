@@ -1,5 +1,6 @@
 from aiogram import Router
 
+from .assistant import router as assistant_router
 from .common import router as common_router
 from .guides import router as guides_router
 from .help import router as help_router
@@ -18,4 +19,5 @@ def get_bot_router() -> Router:
     root_router.include_router(profile_router)
     root_router.include_router(review_router)
     root_router.include_router(search_router)
+    root_router.include_router(assistant_router)
     return root_router

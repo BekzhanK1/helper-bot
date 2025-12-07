@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 from asgiref.sync import sync_to_async
 from django.conf import settings
 
-from bot_app.models import Place, Review
+from bot_app.models import Guide, Place, Review
 
 try:
     from openai import OpenAI
@@ -157,3 +157,168 @@ async def update_place_summary(place_id: int) -> None:
     summary = await sync_to_async(summarize_reviews)(list(reviews))
     summary = summary or SUMMARY_PLACEHOLDER
     await sync_to_async(_save_place_summary)(place, summary)
+
+
+def _build_city_context(city_id: int) -> str:
+    """Собрать контекст о городе из базы данных"""
+    # Получаем все места с отзывами, отсортированные по рейтингу
+    places = Place.objects.filter(
+        city_id=city_id, review_count__gt=0
+    ).select_related("category").order_by("-avg_rating", "-review_count")[:100]
+
+    guides = Guide.objects.filter(city_id=city_id)[:20]
+
+    context_parts = []
+
+    # Места с отзывами - группируем по категориям для удобства
+    if places:
+        context_parts.append(
+            "=== МЕСТА В ГОРОДЕ (ИСПОЛЬЗУЙ ТОЛЬКО ЭТИ РЕАЛЬНЫЕ МЕСТА) ===\n")
+        context_parts.append(
+            "ВАЖНО: Используй ТОЧНЫЕ названия и адреса из этого списка. Не выдумывай места!\n\n")
+
+        # Группируем по категориям
+        places_by_category = {}
+        for place in places:
+            category_name = place.category.name if place.category else "Без категории"
+            if category_name not in places_by_category:
+                places_by_category[category_name] = []
+            places_by_category[category_name].append(place)
+
+        for category_name, category_places in places_by_category.items():
+            context_parts.append(f"\n--- {category_name} ---\n")
+            for place in category_places:
+                place_info = f"• {place.name}"
+                place_info += f"\n  Адрес: {place.address}"
+                if place.avg_rating:
+                    place_info += f"\n  Рейтинг: {place.avg_rating:.1f}/5 ({place.review_count} отзывов)"
+                if place.average_price and place.average_price > 0:
+                    place_info += f"\n  Средний чек: ~{place.average_price} ₸"
+                if place.ai_summary:
+                    place_info += f"\n  Отзывы: {place.ai_summary}"
+                context_parts.append(place_info + "\n")
+
+    # Гайды
+    if guides:
+        context_parts.append("\n=== ГАЙДЫ ===\n")
+        for guide in guides:
+            guide_info = f"- {guide.topic}"
+            if guide.category:
+                guide_info += f" ({guide.category.name})"
+            guide_info += f"\n  {guide.content[:300]}..." if len(
+                guide.content) > 300 else f"\n  {guide.content}"
+            context_parts.append(guide_info + "\n")
+
+    return "\n".join(context_parts)
+
+
+ASSISTANT_SYSTEM_PROMPT = (
+    "Ты AI-помощник для туристов и местных жителей в городе. "
+    "Твоя задача - помогать людям планировать время, находить места, "
+    "составлять маршруты и давать рекомендации на основе информации из базы данных и интернета. "
+    "\n\n"
+    "КРИТИЧЕСКИ ВАЖНО:\n"
+    "- ВСЕГДА комбинируй информацию из базы данных И из интернета для формирования полного ответа\n"
+    "- В ПЕРВУЮ ОЧЕРЕДЬ используй РЕАЛЬНЫЕ МЕСТА из базы данных - их точные названия, адреса, рейтинги и средние чеки\n"
+    "- Если в базе есть подходящее место, ОБЯЗАТЕЛЬНО используй его с ТОЧНЫМ названием и адресом\n"
+    "- ВСЕГДА дополняй информацию из базы результатами веб-поиска - найди дополнительные места в интернете\n"
+    "- Модель автоматически использует веб-поиск для нахождения дополнительных мест, которые могут отсутствовать в базе\n"
+    "- При использовании информации из интернета, указывай конкретные места с адресами и ценами\n"
+    "- Комбинируй информацию: используй места из базы + дополнительные места из интернета\n"
+    "- НЕ выдумывай названия заведений или адреса - используй только реальные данные из базы или интернета\n"
+    "- При составлении планов ВСЕГДА указывай конкретные названия и адреса\n"
+    "- Учитывай бюджет пользователя, если он указан - используй места с подходящими средними чеками\n"
+    "- Делай планы реалистичными и интересными\n"
+    "- Отвечай на русском языке, дружелюбно и полезно\n"
+    "- Если пользователь спрашивает про конкретный день недели, учитывай это при планировании\n"
+    "- Форматируй ответ в HTML для Telegram (используй <b> для жирного, <i> для курсива, переносы строк через \\n)"
+)
+
+
+def generate_recommendation(user_query: str, city_context: str, city_name: str) -> str:
+    """Генерировать рекомендацию на основе запроса пользователя и контекста города"""
+    client = _get_client()
+    if client is None:
+        return "Извините, AI-помощник временно недоступен. Попробуйте позже."
+
+    user_message = (
+        f"Пользователь спрашивает: {user_query}\n\n"
+        f"Город: {city_name}\n\n"
+        f"=== ИНФОРМАЦИЯ ИЗ БАЗЫ ДАННЫХ ===\n{city_context}\n\n"
+        "КРИТИЧЕСКИ ВАЖНЫЕ ИНСТРУКЦИИ:\n"
+        "- ВСЕГДА комбинируй информацию из базы данных И из интернета для формирования полного ответа\n"
+        "- В ПЕРВУЮ ОЧЕРЕДЬ используй реальные места из базы данных выше - их точные названия и адреса\n"
+        "- ВНИМАТЕЛЬНО изучи список мест в базе - там могут быть места для разных категорий\n"
+        "- Если в базе есть подходящее место, ОБЯЗАТЕЛЬНО используй его\n"
+        "- ВСЕГДА дополняй информацию из базы результатами веб-поиска - найди дополнительные места в интернете\n"
+        "- Модель автоматически использует веб-поиск для нахождения дополнительных мест, которые могут отсутствовать в базе\n"
+        "- НЕ говори пользователю 'поищите в интернете' или 'могу поискать' - модель сама должна найти информацию через веб-поиск\n"
+        "- Комбинируй информацию: используй места из базы + дополнительные места из интернета\n"
+        "- После получения результатов веб-поиска, ИСПОЛЬЗУЙ эту информацию в ответе - указывай конкретные места, адреса, цены\n"
+        "- При составлении планов указывай конкретные названия, адреса и средние чеки из базы И из интернета\n"
+        "- Форматируй ответ в HTML для Telegram: используй <b>текст</b> для жирного, <i>текст</i> для курсива\n"
+        "- НЕ используй \\n в тексте - используй реальные переносы строк\n"
+        "- НЕ используй markdown (**, __, # и т.д.), только HTML теги"
+    )
+
+    try:
+        # Используем модель с встроенным веб-поиском OpenAI
+        # Пробуем использовать Responses API с web_search tool
+        try:
+            # Пробуем использовать Responses API (если доступен)
+            response_obj = client.responses.create(
+                model="gpt-4o",
+                tools=[{"type": "web_search"}],
+                input=user_message,
+                instructions=ASSISTANT_SYSTEM_PROMPT,
+            )
+            response = response_obj.output_text or ""
+        except (AttributeError, Exception) as e:
+            # Если Responses API не доступен, используем Chat Completions с моделью, поддерживающей веб-поиск
+            print(f"Responses API not available, trying search models: {e}")
+            try:
+                # Используем модель с поддержкой веб-поиска для Chat Completions
+                # Модели с веб-поиском не поддерживают temperature
+                completion = client.chat.completions.create(
+                    model="gpt-4o-search-preview",  # Модель с поддержкой веб-поиска
+                    messages=[
+                        {"role": "system", "content": ASSISTANT_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_message},
+                    ],
+                )
+                response = (
+                    completion.choices[0].message.content or "").strip()
+            except Exception as search_error:
+                print(
+                    f"Search model not available ({search_error}), using regular model with fallback")
+                # Если модели с веб-поиском нет, используем обычную модель
+                # Модель будет использовать свои знания
+                completion = client.chat.completions.create(
+                    model="gpt-4o",
+                    temperature=0.7,
+                    messages=[
+                        {"role": "system", "content": ASSISTANT_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_message},
+                    ],
+                )
+                response = (
+                    completion.choices[0].message.content or "").strip()
+
+        # Убираем markdown форматирование, если оно есть
+        import re
+        # Заменяем markdown на HTML
+        response = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', response)
+        response = re.sub(r'__(.+?)__', r'<b>\1</b>', response)
+        response = re.sub(r'\*(.+?)\*', r'<i>\1</i>', response)
+        response = re.sub(r'_(.+?)_', r'<i>\1</i>', response)
+        response = re.sub(r'### (.+?)\n', r'<b>\1</b>\n', response)
+        response = re.sub(r'## (.+?)\n', r'<b>\1</b>\n', response)
+        response = re.sub(r'# (.+?)\n', r'<b>\1</b>\n', response)
+
+        return response
+    except Exception as exc:
+        print(
+            f"generate_recommendation: exception {type(exc).__name__}: {exc}")
+        import traceback
+        traceback.print_exc()
+        return "Извините, произошла ошибка при генерации рекомендации. Попробуйте переформулировать вопрос."

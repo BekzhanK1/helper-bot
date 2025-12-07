@@ -34,6 +34,8 @@ class User(models.Model):
         max_length=20, choices=Role.choices, default=Role.TOURIST)
     balance_requests = models.IntegerField(default=5)
     reputation_points = models.IntegerField(default=0)
+    ai_requests_balance = models.IntegerField(
+        default=10, help_text="Количество доступных запросов к AI-помощнику")
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.NOVICE)
 

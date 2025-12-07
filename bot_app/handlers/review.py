@@ -154,6 +154,7 @@ def publish_review(review_id: int, summary: str) -> None:
     User.objects.filter(telegram_id=review.user_id).update(
         balance_requests=DjangoF("balance_requests") + 10,
         reputation_points=DjangoF("reputation_points") + 10,
+        ai_requests_balance=DjangoF("ai_requests_balance") + 10,
     )
 
 
@@ -522,7 +523,7 @@ async def finalize_review(message: Message, state: FSMContext) -> None:
     await update_place_summary(place_id)
     await state.clear()
     await message.answer(
-        "Спасибо! Отзыв опубликован. Вам начислено 10 запросов.",
+        "Спасибо! Отзыв опубликован. Вам начислено 10 запросов к AI-помощнику.",
         reply_markup=main_menu_keyboard(),
     )
 

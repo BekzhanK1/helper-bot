@@ -39,11 +39,13 @@ class UserAdmin(UnfoldModelAdmin):
         "status",
         "balance_requests",
         "reputation_points",
+        "ai_requests_balance",
     )
     list_filter = ("role", "status", "city")
     search_fields = ("telegram_id", "username", "full_name")
     readonly_fields = ("telegram_id",)
-    list_editable = ("balance_requests", "reputation_points")
+    list_editable = ("balance_requests", "reputation_points",
+                     "ai_requests_balance")
     fields = (
         "telegram_id",
         "username",
@@ -53,6 +55,7 @@ class UserAdmin(UnfoldModelAdmin):
         "status",
         "balance_requests",
         "reputation_points",
+        "ai_requests_balance",
     )
 
 
