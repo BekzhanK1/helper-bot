@@ -144,6 +144,17 @@ async def process_assistant_query(message: Message, state: FSMContext) -> None:
         f"{response}\n\n"
         f"💡 Осталось запросов к AI-помощнику: {remaining_balance}"
     )
-    await message.answer(
-        response_with_balance, parse_mode="HTML", reply_markup=main_menu_keyboard()
-    )
+
+    # Пытаемся отправить с HTML, если не получается - отправляем без форматирования
+    try:
+        await message.answer(
+            response_with_balance, parse_mode="HTML", reply_markup=main_menu_keyboard()
+        )
+    except Exception as e:
+        # Если ошибка парсинга HTML, отправляем без форматирования
+        import re
+        # Удаляем все HTML теги для fallback
+        text_only = re.sub(r'<[^>]+>', '', response_with_balance)
+        await message.answer(
+            text_only, reply_markup=main_menu_keyboard()
+        )
