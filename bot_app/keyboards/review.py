@@ -6,6 +6,7 @@ from .navigation import get_navigation_keyboard
 
 CREATE_PLACE_BUTTON = "➕ Создать новое место"
 PHOTO_DONE_BUTTON = "Готово"
+SKIP_PRICE_BUTTON = "Пропустить"
 
 
 def _chunk(items: Iterable[str], size: int = 2) -> List[list[str]]:
@@ -46,6 +47,11 @@ def rating_keyboard() -> ReplyKeyboardMarkup:
 
 def text_keyboard() -> ReplyKeyboardMarkup:
     return get_navigation_keyboard([], include_back=True, include_menu=True)
+
+
+def price_keyboard() -> ReplyKeyboardMarkup:
+    rows = [[SKIP_PRICE_BUTTON]]
+    return get_navigation_keyboard(rows, include_back=True, include_menu=True)
 
 
 def photo_keyboard() -> ReplyKeyboardMarkup:

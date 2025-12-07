@@ -8,4 +8,5 @@ class AddReviewState(StatesGroup):
     category = State()
     rating = State()
     text = State()
+    price = State()
     photos = State()

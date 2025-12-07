@@ -71,6 +71,8 @@ class Place(models.Model):
         max_length=255, unique=True, blank=True, null=True)
     avg_rating = models.FloatField(default=0.0)
     review_count = models.IntegerField(default=0)
+    average_price = models.IntegerField(
+        default=0, null=True, blank=True, help_text="Средний чек в тенге (KZT)")
     ai_summary = models.TextField(blank=True)
     is_pinned = models.BooleanField(default=False)
 
@@ -95,6 +97,8 @@ class Review(models.Model):
     rating = models.IntegerField(
         validators=[MinValueValidator(1), MaxValueValidator(5)])
     text = models.TextField()
+    price = models.IntegerField(
+        null=True, blank=True, help_text="Сумма чека в тенге (KZT) (опционально)")
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.PENDING)
     is_verified_by_ai = models.BooleanField(default=False)
@@ -108,10 +112,24 @@ class Review(models.Model):
         verbose_name_plural = "Reviews"
 
 
+class GuideCategory(models.Model):
+    name = models.CharField(max_length=120, unique=True)
+    slug = models.SlugField(unique=True)
+
+    def __str__(self) -> str:
+        return self.name
+
+    class Meta:
+        verbose_name = "Guide Category"
+        verbose_name_plural = "Guide Categories"
+
+
 class Guide(models.Model):
     topic = models.CharField(max_length=200)
     city = models.ForeignKey(
         City, on_delete=models.CASCADE, related_name="guides")
+    category = models.ForeignKey(
+        GuideCategory, on_delete=models.CASCADE, related_name="guides", blank=True, null=True)
     content = models.TextField()
 
     def __str__(self) -> str:

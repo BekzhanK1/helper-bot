@@ -79,6 +79,34 @@ def search_places(city_id: int, category_id: int) -> List[Place]:
 
 
 @sync_to_async
+def search_places_by_name(city_id: int, name_query: str) -> List[Place]:
+    """Поиск мест по названию (без учета регистра)"""
+    query = name_query.strip()
+    if not query:
+        return []
+
+    pinned = list(
+        Place.objects.filter(
+            city_id=city_id,
+            name__icontains=query,
+            is_pinned=True,
+        ).order_by("-avg_rating")
+    )
+    organic = list(
+        Place.objects.filter(
+            city_id=city_id,
+            name__icontains=query,
+            is_pinned=False,
+            review_count__gt=0,
+        )
+        .order_by("-avg_rating", "-review_count")
+    )
+    seen = {place.id for place in pinned}
+    ordered = pinned + [place for place in organic if place.id not in seen]
+    return ordered
+
+
+@sync_to_async
 def get_place_by_id(place_id: int) -> Optional[Place]:
     return Place.objects.filter(id=place_id).first()
 
@@ -108,10 +136,14 @@ def get_recent_place_photos(place_id: int, limit: int = 5) -> List[str]:
 def render_place_card(place: Place) -> str:
     rating = f"{place.avg_rating:.1f}" if place.avg_rating else "—"
     ai_summary = place.ai_summary or "AI-описание появится позже."
+    price_info = ""
+    if place.average_price and place.average_price > 0:
+        price_info = f"💰 Средний чек: ~{place.average_price} ₸\n"
     return (
         f"🏆 <b>{place.name}</b> (⭐ {rating} / 📝 {place.review_count})\n"
-        f"📍 {place.address}\n\n"
-        "🤖 <i>Мнение нейросети:</i>\n"
+        f"📍 {place.address}\n"
+        f"{price_info}"
+        "\n🤖 <i>Мнение нейросети:</i>\n"
         f"{ai_summary}"
     )
 
@@ -185,7 +217,7 @@ async def start_search(message: Message, state: FSMContext) -> None:
     await state.set_state(SearchState.category)
     await state.update_data(city_id=user.city_id)
     await message.answer(
-        "Выберите категорию, чтобы найти интересные места:",
+        "Выберите категорию или введите название места для поиска:",
         reply_markup=category_keyboard(categories),
     )
 
@@ -236,12 +268,51 @@ async def _run_search_for_category(
 
 @router.message(SearchState.category)
 async def process_category(message: Message, state: FSMContext) -> None:
-    category = await find_category_by_name(message.text or "")
-    if not category:
-        await message.answer("Не нашёл такую категорию. Выберите вариант из списка.")
+    from_user = message.from_user
+    if not from_user:
+        await message.answer("Не удалось определить ваш Telegram ID.")
+        await state.clear()
         return
 
-    await _run_search_for_category(message, state, category=category)
+    data = await state.get_data()
+    city_id = data.get("city_id")
+    if not city_id:
+        await message.answer("Неизвестный город. Начните заново через /start.")
+        await state.clear()
+        return
+
+    text = (message.text or "").strip()
+
+    # Сначала проверяем, является ли это категорией
+    category = await find_category_by_name(text)
+    if category:
+        await _run_search_for_category(message, state, category=category)
+        return
+
+    # Если не категория, пробуем поиск по названию
+    has_balance = await deduct_user_request(from_user.id)
+    if not has_balance:
+        await message.answer("Лимиты исчерпаны! Напиши отзыв, чтобы получить +10 запросов.")
+        await state.clear()
+        return
+
+    places = await search_places_by_name(city_id=city_id, name_query=text)
+    await state.set_state(SearchState.results)
+
+    if not places:
+        await state.update_data(found_place_ids=[], current_index=0)
+        await message.answer(
+            f"Не нашёл мест с названием '{text}'. Попробуйте другой запрос или выберите категорию.",
+            reply_markup=category_keyboard(await categories_for_city(city_id) or await all_categories()),
+        )
+        return
+
+    await state.update_data(
+        category_id=None,  # Поиск по названию, не по категории
+        found_place_ids=[place.id for place in places],
+        current_index=0,
+    )
+    await send_place_card(message, state, new_message=True)
 
 
 @router.message(StateFilter(SearchState.results), F.text == NAV_BACK_BUTTON)
@@ -268,27 +339,57 @@ async def search_back_to_categories(message: Message, state: FSMContext) -> None
         current_index=0,
     )
     await message.answer(
-        "Выберите другую категорию:",
+        "Выберите другую категорию или введите название места для поиска:",
         reply_markup=category_keyboard(categories),
     )
 
 
 @router.message(StateFilter(SearchState.results))
 async def search_results_input(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip()
-    if not text:
-        await message.answer("Используйте кнопки под карточкой или введите категорию заново.")
+    from_user = message.from_user
+    if not from_user:
+        await message.answer("Не удалось определить ваш Telegram ID.")
         return
 
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Используйте кнопки под карточкой или введите категорию/название заново.")
+        return
+
+    data = await state.get_data()
+    city_id = data.get("city_id")
+    if not city_id:
+        await message.answer("Неизвестный город. Начните поиск заново.", reply_markup=main_menu_keyboard())
+        await state.clear()
+        return
+
+    # Сначала проверяем, является ли это категорией
     category = await find_category_by_name(text)
     if category:
         await _run_search_for_category(message, state, category=category)
         return
 
-    await message.answer(
-        "Используйте кнопки под карточкой, чтобы листать места или откройте меню.",
-        reply_markup=main_menu_keyboard(),
+    # Если не категория, пробуем поиск по названию
+    has_balance = await deduct_user_request(from_user.id)
+    if not has_balance:
+        await message.answer("Лимиты исчерпаны! Напиши отзыв, чтобы получить +10 запросов.")
+        return
+
+    places = await search_places_by_name(city_id=city_id, name_query=text)
+    await state.set_state(SearchState.results)
+
+    if not places:
+        await message.answer(
+            f"Не нашёл мест с названием '{text}'. Попробуйте другой запрос или используйте кнопки навигации.",
+        )
+        return
+
+    await state.update_data(
+        category_id=None,  # Поиск по названию, не по категории
+        found_place_ids=[place.id for place in places],
+        current_index=0,
     )
+    await send_place_card(message, state, new_message=True)
 
 
 @router.callback_query(StateFilter(SearchState.results), F.data == "nav_next")

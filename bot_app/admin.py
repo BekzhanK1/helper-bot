@@ -5,7 +5,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - optional dependency
     UnfoldModelAdmin = admin.ModelAdmin
 
-from .models import Category, City, Guide, Place, Review, User
+from .models import Category, City, Guide, GuideCategory, Place, Review, User
 
 
 @admin.register(City)
@@ -17,6 +17,13 @@ class CityAdmin(UnfoldModelAdmin):
 
 @admin.register(Category)
 class CategoryAdmin(UnfoldModelAdmin):
+    list_display = ("name", "slug")
+    search_fields = ("name", "slug")
+    prepopulated_fields = {"slug": ("name",)}
+
+
+@admin.register(GuideCategory)
+class GuideCategoryAdmin(UnfoldModelAdmin):
     list_display = ("name", "slug")
     search_fields = ("name", "slug")
     prepopulated_fields = {"slug": ("name",)}
@@ -66,5 +73,6 @@ class ReviewAdmin(UnfoldModelAdmin):
 
 @admin.register(Guide)
 class GuideAdmin(UnfoldModelAdmin):
-    list_display = ("topic", "city")
-    search_fields = ("topic", "city__name")
+    list_display = ("topic", "category", "city")
+    list_filter = ("category", "city")
+    search_fields = ("topic", "city__name", "category__name")

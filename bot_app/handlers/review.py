@@ -13,11 +13,13 @@ from bot_app.keyboards.navigation import NAV_BACK_BUTTON
 from bot_app.keyboards.review import (
     CREATE_PLACE_BUTTON,
     PHOTO_DONE_BUTTON,
+    SKIP_PRICE_BUTTON,
     address_keyboard,
     category_keyboard,
     photo_keyboard,
     place_name_keyboard,
     place_suggestions_keyboard,
+    price_keyboard,
     rating_keyboard,
     text_keyboard,
 )
@@ -91,12 +93,14 @@ def create_pending_review(
     rating: int,
     text: str,
     photos: List[str],
+    price: Optional[int] = None,
 ) -> Review:
     return Review.objects.create(
         user_id=user_id,
         place_id=place_id,
         rating=rating,
         text=text,
+        price=price,
         status=Review.Status.PENDING,
         is_verified_by_ai=False,
         photo_ids=photos,
@@ -121,9 +125,28 @@ def publish_review(review_id: int, summary: str) -> None:
     total_score = place.avg_rating * place.review_count
     place.review_count += 1
     place.avg_rating = (total_score + review.rating) / place.review_count
+
+    # Пересчитываем средний чек на основе всех опубликованных отзывов с указанной ценой
+    if review.price is not None and review.price > 0:
+        reviews_with_price = Review.objects.filter(
+            place=place,
+            status=Review.Status.PUBLISHED,
+            price__isnull=False,
+            price__gt=0,
+        ).exclude(id=review_id)  # Исключаем текущий отзыв, так как он еще не опубликован
+
+        total_price = sum(r.price for r in reviews_with_price) + review.price
+        count_with_price = reviews_with_price.count() + 1
+        place.average_price = int(total_price / count_with_price)
+
     if summary:
         place.ai_summary = summary
-    place.save(update_fields=["avg_rating", "review_count", "ai_summary"])
+
+    update_fields = ["avg_rating", "review_count", "ai_summary"]
+    if review.price is not None and review.price > 0:
+        update_fields.append("average_price")
+
+    place.save(update_fields=update_fields)
 
     review.status = Review.Status.PUBLISHED
     review.save(update_fields=["status"])
@@ -407,11 +430,39 @@ async def process_text(message: Message, state: FSMContext) -> None:
         return
 
     await state.update_data(review_text=review_text)
-    await state.set_state(AddReviewState.photos)
+    await state.set_state(AddReviewState.price)
     await message.answer(
-        "Отправьте фотографии (можно несколько). Когда закончите, нажмите 'Готово'.",
-        reply_markup=photo_keyboard(),
+        "Укажите сумму чека в тенге (сколько вы потратили). Можно пропустить:",
+        reply_markup=price_keyboard(),
     )
+
+
+@router.message(StateFilter(AddReviewState.price))
+async def process_price(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+
+    if text == SKIP_PRICE_BUTTON:
+        await state.update_data(price=None)
+        await state.set_state(AddReviewState.photos)
+        await message.answer(
+            "Отправьте фотографии (можно несколько). Когда закончите, нажмите 'Готово'.",
+            reply_markup=photo_keyboard(),
+        )
+        return
+
+    try:
+        price = int(text)
+        if price < 0:
+            await message.answer("Сумма не может быть отрицательной. Введите положительное число или нажмите 'Пропустить'.")
+            return
+        await state.update_data(price=price)
+        await state.set_state(AddReviewState.photos)
+        await message.answer(
+            "Отправьте фотографии (можно несколько). Когда закончите, нажмите 'Готово'.",
+            reply_markup=photo_keyboard(),
+        )
+    except ValueError:
+        await message.answer("Пожалуйста, введите число (сумму в тенге) или нажмите 'Пропустить'.")
 
 
 @router.message(StateFilter(AddReviewState.photos), F.photo)
@@ -433,6 +484,7 @@ async def finalize_review(message: Message, state: FSMContext) -> None:
     rating = data.get("rating")
     review_text = data.get("review_text")
     photos = data.get("photos", [])
+    price = data.get("price")  # Может быть None
 
     if not all([user_id, place_id, rating, review_text]):
         await state.clear()
@@ -448,6 +500,7 @@ async def finalize_review(message: Message, state: FSMContext) -> None:
         rating=rating,
         text=review_text,
         photos=photos,
+        price=price,
     )
 
     print(f"AI moderation: analyzing review_id={review.id}")
@@ -527,7 +580,16 @@ async def back_to_rating_from_text(message: Message, state: FSMContext) -> None:
 
 
 @router.message(StateFilter(AddReviewState.photos), F.text == NAV_BACK_BUTTON)
-async def back_to_text_from_photos(message: Message, state: FSMContext) -> None:
+async def back_to_price_from_photos(message: Message, state: FSMContext) -> None:
+    await state.set_state(AddReviewState.price)
+    await message.answer(
+        "Вернёмся к сумме чека. Укажите сумму в рублях или нажмите 'Пропустить':",
+        reply_markup=price_keyboard(),
+    )
+
+
+@router.message(StateFilter(AddReviewState.price), F.text == NAV_BACK_BUTTON)
+async def back_to_text_from_price(message: Message, state: FSMContext) -> None:
     await state.set_state(AddReviewState.text)
     await message.answer(
         "Вернёмся к тексту отзыва. Напишите его снова (или отправьте другой):",
